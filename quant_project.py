@@ -73,6 +73,71 @@ df["MOM12"] = momentum_12m
 vol = price.pct_change().std()
 df["VOL"] = vol
 
+# ========= 5-2. 시계열 기반 미래예측 (LSTM + Prophet 결합) ============
+
+from sklearn.preprocessing import MinMaxScaler
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense
+from prophet import Prophet
+
+# LSTM 준비
+lstm_predictions = {}
+
+for t in tickers:
+    ts = price[t].dropna()
+    if len(ts) < 300:
+        lstm_predictions[t] = 0
+        continue
+
+    scaler = MinMaxScaler()
+    scaled = scaler.fit_transform(ts.values.reshape(-1,1))
+
+    X_lstm, y_lstm = [], []
+    for i in range(len(scaled) - 60):
+        X_lstm.append(scaled[i:i+60])
+        y_lstm.append(scaled[i+60])
+    X_lstm, y_lstm = np.array(X_lstm), np.array(y_lstm)
+
+    model_lstm = Sequential()
+    model_lstm.add(LSTM(50, return_sequences=False, input_shape=(60,1)))
+    model_lstm.add(Dense(1))
+    model_lstm.compile(optimizer="adam", loss="mse")
+    model_lstm.fit(X_lstm, y_lstm, epochs=5, batch_size=32, verbose=0)
+
+    last_seq = scaled[-60:].reshape(1,60,1)
+    pred_scaled = model_lstm.predict(last_seq, verbose=0)[0][0]
+    next_price_lstm = scaler.inverse_transform([[pred_scaled]])[0][0]
+
+    lstm_predictions[t] = (next_price_lstm / ts.iloc[-1] - 1)
+
+# Prophet 기반 예측
+prophet_predictions = {}
+
+for t in tickers:
+    ts = price[t].dropna()
+    if len(ts) < 300:
+        prophet_predictions[t] = 0
+        continue
+
+    df_prophet = pd.DataFrame({
+        "ds": ts.index,
+        "y": ts.values
+    })
+
+    model_p = Prophet()
+    model_p.fit(df_prophet)
+
+    future = model_p.make_future_dataframe(periods=30)
+    forecast = model_p.predict(future)
+
+    pred_30d = forecast["yhat"].iloc[-1]
+    prophet_predictions[t] = (pred_30d / ts.iloc[-1] - 1)
+
+# LSTM + Prophet 앙상블 예측
+df["PRED_LSTM"] = df.index.map(lstm_predictions)
+df["PRED_PROPHET"] = df.index.map(prophet_predictions)
+df["PRED_HYBRID"] = (df["PRED_LSTM"] + df["PRED_PROPHET"]) / 2
+
 # ========= 5-1. ML 기반 미래 예측 (30일 미래 수익률 예측) ============
 # 과거 30일 미래 수익률 계산
 future_return = price.shift(-30) / price - 1
@@ -101,7 +166,7 @@ model = RandomForestRegressor(n_estimators=200, random_state=42)
 model.fit(X, y)
 
 # 현재 시점에서 30일 미래 수익률 예측
-df["PRED_RET_30D"] = model.predict(X)
+df["PRED_RET_30D"] = df["PRED_HYBRID"]
 
 # ========= 6. 팩터 표준화(랭킹화) ============
 df["PER_rank"] = df["PER"].rank()
@@ -121,7 +186,7 @@ df["score"] = (
     + df["MOM6_rank"] * 2
     + df["MOM12_rank"] * 3
     + df["VOL_rank"] * 1
-    + df["PRED_rank"] * 4  # 미래예측 가중치 강화
+    + df["PRED_rank"] * 6  # 미래예측 가중치 강화
 )
 
 df = df.sort_values("score")
