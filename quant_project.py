@@ -66,6 +66,17 @@ for _ in range(30):
 lstm_future_index = pd.date_range(start=price["ds"].iloc[-1], periods=31, freq="D")[1:]
 lstm_future = pd.Series(future_pred, index=lstm_future_index)
 
+# ===== 예측값 시작점을 실제 종가로 강제 정렬 =====
+last_real_price = price["y"].iloc[-1]
+
+# Prophet 보정
+prophet_first = prophet_future.iloc[0]
+prophet_future = prophet_future * (last_real_price / prophet_first)
+
+# LSTM 보정
+lstm_first = lstm_future.iloc[0]
+lstm_future = lstm_future * (last_real_price / lstm_first)
+
 
 # 4) 그래프 출력 — 미래만 표시
 plt.figure(figsize=(12,6))
