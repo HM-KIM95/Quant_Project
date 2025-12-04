@@ -1,92 +1,129 @@
+import torch
+torch.set_default_dtype(torch.float32)
 import yfinance as yf
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
-import matplotlib
-matplotlib.rcParams['font.family'] = 'AppleGothic'
-matplotlib.rcParams['axes.unicode_minus'] = False
-from prophet import Prophet
-from sklearn.preprocessing import MinMaxScaler
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense
+from xgboost import XGBRegressor
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+
+from darts import TimeSeries
+from darts.models import TFTModel
 
 
+# =========================
 # 1) 데이터 로드
+# =========================
 ticker = "AAPL"
 df = yf.download(ticker, start="2015-01-01", auto_adjust=True)
-price = df["Close"].reset_index()
-price.columns = ["ds", "y"]
+
+df = df[["Close"]].rename(columns={"Close": "y"})
 
 
-# 2) Prophet 기반 30일 미래 예측
-prophet_model = Prophet()
-prophet_model.fit(price)
-
-future = prophet_model.make_future_dataframe(periods=30)
-forecast = prophet_model.predict(future)
-
-prophet_future = forecast[["ds", "yhat"]].tail(30)
-prophet_future = prophet_future.set_index("ds")["yhat"]
+# =========================
+# 2) 미래 수익률 라벨 생성 (XGBoost용)
+# =========================
+df["future_30"] = df["y"].shift(-30) / df["y"] - 1
+df = df.dropna()
 
 
-# 3) LSTM 기반 30일 미래 예측
+# =========================
+# 3) XGBoost 입력 특징 생성
+# =========================
+df["ret_1d"] = df["y"].pct_change()
+df["ret_5d"] = df["y"].pct_change(5)
+df["ret_20d"] = df["y"].pct_change(20)
+df["vol_20d"] = df["y"].pct_change().rolling(20).std()
+df = df.dropna()
 
-# 시계열 스케일링
-scaler = MinMaxScaler()
-scaled = scaler.fit_transform(price["y"].values.reshape(-1,1))
+features = ["ret_1d", "ret_5d", "ret_20d", "vol_20d"]
+X = df[features]
+y = df["future_30"]
 
-window = 60
-X_lstm, y_lstm = [], []
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X)
 
-for i in range(len(scaled) - window - 1):
-    X_lstm.append(scaled[i:i+window])
-    y_lstm.append(scaled[i+window])
+X_train, X_test, y_train, y_test = train_test_split(
+    X_scaled, y, test_size=0.1, shuffle=False
+)
 
-X_lstm, y_lstm = np.array(X_lstm), np.array(y_lstm)
+# =========================
+# 4) XGBoost 학습
+# =========================
+xgb_model = XGBRegressor(
+    n_estimators=300,
+    learning_rate=0.03,
+    max_depth=6,
+    subsample=0.8,
+    colsample_bytree=0.8,
+)
+xgb_model.fit(X_train, y_train)
 
-model = Sequential()
-model.add(LSTM(50, return_sequences=False, input_shape=(window,1)))
-model.add(Dense(1))
-model.compile(optimizer="adam", loss="mse")
-model.fit(X_lstm, y_lstm, epochs=7, batch_size=32, verbose=0)
+# =========================
+# 5) XGBoost 30일 미래 수익률 예측
+# =========================
+last_features = df[features].iloc[-1:].values
+last_features_scaled = scaler.transform(last_features)
+xgb_pred = xgb_model.predict(last_features_scaled)[0]
 
-# 다중스텝 미래 예측
-future_pred = []
-last_seq = scaled[-window:].reshape(1, window, 1)
-
-for _ in range(30):
-    next_scaled = model.predict(last_seq, verbose=0)[0][0]
-    next_price = scaler.inverse_transform([[next_scaled]])[0][0]
-    future_pred.append(next_price)
-
-    last_seq = np.append(last_seq[:,1:,:], [[[next_scaled]]], axis=1)
-
-# LSTM 미래 시리즈
-lstm_future_index = pd.date_range(start=price["ds"].iloc[-1], periods=31, freq="D")[1:]
-lstm_future = pd.Series(future_pred, index=lstm_future_index)
-
-# ===== 예측값 시작점을 실제 종가로 강제 정렬 =====
-last_real_price = price["y"].iloc[-1]
-
-# Prophet 보정
-prophet_first = prophet_future.iloc[0]
-prophet_future = prophet_future * (last_real_price / prophet_first)
-
-# LSTM 보정
-lstm_first = lstm_future.iloc[0]
-lstm_future = lstm_future * (last_real_price / lstm_first)
+print("📌 XGBoost 예측 미래 30일 수익률:", round(xgb_pred * 100, 2), "%")
 
 
-# 4) 그래프 출력 — 미래만 표시
+# =========================
+# 6) TFT 기반 미래 가격 30일 예측
+# =========================
+series = TimeSeries.from_dataframe(
+    df,
+    value_cols="y",
+    fill_missing_dates=True,
+    freq="B"
+)
+
+tft = TFTModel(
+    input_chunk_length=60,
+    output_chunk_length=30,
+    hidden_size=32,
+    lstm_layers=2,
+    dropout=0.1,
+    batch_size=32,
+    n_epochs=30,
+    add_relative_index=True,
+    accelerator="cpu"
+)
+
+tft.fit(series)
+
+tft_future = tft.predict(30)
+
+
+# =========================
+# 7) 앙상블 최종 예측
+# =========================
+future_curve = tft_future.values().flatten()
+future_dates = tft_future.time_index
+
+# XGBoost 기반 단일 미래 30일 가격 예측
+last_price = df["y"].iloc[-1]
+xgb_pred_price = last_price * (1 + xgb_pred)
+
+ensemble_price = (future_curve[-1] * 0.6) + (xgb_pred_price * 0.4)
+
+print("\n📌 최종 앙상블 예측 30일 뒤 가격:", round(float(ensemble_price), 2))
+
+
+# =========================
+# 8) 그래프 출력
+# =========================
 plt.figure(figsize=(12,6))
 
-plt.plot(prophet_future.index, prophet_future.values, label="Prophet 예측", color="green")
-plt.plot(lstm_future.index, lstm_future.values, label="LSTM 예측", color="blue")
+plt.plot(future_dates, future_curve, label="TFT 미래 가격", color="green")
+plt.scatter(future_dates[-1], ensemble_price, color="red", label="앙상블 최종 예측")
 
-plt.title(f"{ticker} 미래 30일 전망 (LSTM + Prophet)")
+plt.title("AAPL 30일 미래 예측 (XGBoost + TFT 앙상블)")
 plt.xlabel("날짜")
 plt.ylabel("예측 가격")
-plt.legend()
 plt.grid(True)
+plt.legend()
 plt.show()
