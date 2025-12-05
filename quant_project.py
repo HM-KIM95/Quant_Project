@@ -4,8 +4,11 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib import rc
 
 from xgboost import XGBRegressor
+plt.rcParams['axes.unicode_minus'] = False
+rc('font', family='AppleGothic')
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 
@@ -90,7 +93,7 @@ tft = TFTModel(
     batch_size=32,
     n_epochs=30,
     add_relative_index=True,
-    accelerator="cpu"
+    pl_trainer_kwargs={"accelerator": "cpu"}
 )
 
 tft.fit(series)
@@ -118,6 +121,7 @@ print("\n📌 최종 앙상블 예측 30일 뒤 가격:", round(float(ensemble_p
 # =========================
 plt.figure(figsize=(12,6))
 
+plt.plot(df.index[-60:], df["y"].iloc[-60:], label="실제 종가 (최근 60일)", color="blue")
 plt.plot(future_dates, future_curve, label="TFT 미래 가격", color="green")
 plt.scatter(future_dates[-1], ensemble_price, color="red", label="앙상블 최종 예측")
 
