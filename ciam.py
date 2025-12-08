@@ -14,12 +14,21 @@ if not DART_API_KEY:
 # 3) dart_fss에 API KEY 설정
 dart.set_api_key(api_key=DART_API_KEY)
 
-# 4) 테스트용 함수 예시
+# 4) 기업명으로 사업보고서 조회
 def get_corp_report(corp_name: str):
     """기업명으로 사업보고서 리스트 불러오기"""
     try:
-        corp = dart.get_corp(corp_name)
-        filings = corp.get_filings("사업보고서")
+        search_result = dart.search_corp(corp_name)
+        
+        if len(search_result) == 0:
+            return f"기업 '{corp_name}'을 찾을 수 없습니다."
+        
+        corp = search_result[0] # 첫 번째 결과 선택
+        
+        # 사업보고서(annual) 검색
+        
+        filings = corp.get_filings(report_type="annual")
+        
         return filings
     
     except Exception as e:
